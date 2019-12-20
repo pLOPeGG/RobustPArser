@@ -1,0 +1,6 @@
+.venv
+.vscode
+.data
+.mypy
+
+robust_parser/__pycache__
