@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from robust_parser import config
+from robust_parser import config, data
 
 
 class EncoderRNN(nn.Module):
@@ -14,17 +14,13 @@ class EncoderRNN(nn.Module):
         self.embedding = nn.Embedding(input_size, hidden_size)
         self.gru = nn.GRU(hidden_size, hidden_size)
 
-    def forward(self, input, hidden):
-        embedded = self.embedding(input).view(1, 1, -1)
+    def forward(self, input):
+        embedded = self.embedding(input)
         output = embedded
-        output, hidden = self.gru(output, hidden)
+        output, hidden = self.gru(output)
         return output, hidden
 
-    def initHidden(self):
-        return torch.zeros(1, 1, self.hidden_size, device=config.device)
-    
-    
-    
+
 class DecoderRNN(nn.Module):
     def __init__(self, hidden_size, output_size):
         super(DecoderRNN, self).__init__()
@@ -36,7 +32,7 @@ class DecoderRNN(nn.Module):
         self.softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, input, hidden):
-        output = self.embedding(input).view(1, 1, -1)
+        output = self.embedding(input)
         output = F.relu(output)
         output, hidden = self.gru(output, hidden)
         output = self.softmax(self.out(output[0]))
@@ -44,10 +40,10 @@ class DecoderRNN(nn.Module):
 
     def initHidden(self):
         return torch.zeros(1, 1, self.hidden_size, device=config.device)
-    
-    
+
+
 class AttnDecoderRNN(nn.Module):
-    def __init__(self, hidden_size, output_size, dropout_p=0.1, max_length=MAX_LENGTH):
+    def __init__(self, hidden_size, output_size, dropout_p=0.1, max_length=20):
         super(AttnDecoderRNN, self).__init__()
         self.hidden_size = hidden_size
         self.output_size = output_size
@@ -62,16 +58,18 @@ class AttnDecoderRNN(nn.Module):
         self.out = nn.Linear(self.hidden_size, self.output_size)
 
     def forward(self, input, hidden, encoder_outputs):
-        embedded = self.embedding(input).view(1, 1, -1)
+        embedded = self.embedding(input)
         embedded = self.dropout(embedded)
 
         attn_weights = F.softmax(
-            self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
-        attn_applied = torch.bmm(attn_weights.unsqueeze(0),
-                                 encoder_outputs.unsqueeze(0))
+            self.attn(torch.cat((embedded, hidden), dim=-1)), dim=-1
+        )
+        attn_applied = torch.bmm(
+            attn_weights, encoder_outputs.unsqueeze(0)
+        )
 
-        output = torch.cat((embedded[0], attn_applied[0]), 1)
-        output = self.attn_combine(output).unsqueeze(0)
+        output = torch.cat((embedded, attn_applied), -1)
+        output = self.attn_combine(output)
 
         output = F.relu(output)
         output, hidden = self.gru(output, hidden)
@@ -81,3 +79,33 @@ class AttnDecoderRNN(nn.Module):
 
     def initHidden(self):
         return torch.zeros(1, 1, self.hidden_size, device=config.device)
+
+
+if __name__ == "__main__":
+    data.set_seed(112)
+
+    batch_size = 4
+    hidden_size = 100
+
+    dataset = data.DateDataset(6)
+    data_loader = data.get_date_dataloader(dataset, batch_size)
+
+    encoder, decoder = (
+        EncoderRNN(len(data.vocabulary), hidden_size),
+        DecoderRNN(hidden_size, len(data.vocabulary)),
+    )
+    encoder.initHidden()
+    for i, t, o in data_loader:
+        mid, hidden = encoder(i, torch.zeros((1, i.size(1), hidden_size)))
+        print(
+            decoder(
+                torch.Tensor(
+                    [
+                        [data.vocabulary[data.__BEG__]] * i.size(1),
+                        [data.vocabulary["2"]] * i.size(1),
+                    ]
+                ).long(),
+                hidden,
+            )[0].shape
+        )
+

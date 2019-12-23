@@ -13,6 +13,7 @@ from robust_parser import config
 __BEG__ = "__BEG__"
 __END__ = "__END__"
 __PAD__ = "__PAD__"
+__MSK__ = "__MSK__"
 
 ISODate = NewType("ISODate", str)
 Date = NewType("Date", str)
@@ -23,7 +24,8 @@ vocabulary = {
     __BEG__: 0,
     __END__: 1,
     __PAD__: 2,
-    **{c: i for i, c in enumerate(charset, 3)},
+    __MSK__: 3,
+    **{c: i for i, c in enumerate(charset, 4)},
 }
 
 
@@ -38,8 +40,8 @@ class DateDataset(torch.utils.data.Dataset):
         self._raw_dataset = [generate_date_pair() for _ in range(n)]
         self._dataset = [
             (
-                [vocabulary[__BEG__]] + [vocabulary[c] for c in x],
-                [vocabulary[c] for c in y] + [vocabulary[__END__]],
+                [vocabulary[c] for c in x],
+                [vocabulary[c] for c in y],
             )
             for x, y in self._raw_dataset
         ]
@@ -54,6 +56,8 @@ class DateDataset(torch.utils.data.Dataset):
 class DateLoader(torch.utils.data.DataLoader):
     def __init__(self, dataset, batch_size, drop_last=False):
         self._dataset = dataset
+
+        self.device = config.device
         self.batch_size = batch_size
         self.drop_last = drop_last
 
@@ -67,42 +71,42 @@ class DateLoader(torch.utils.data.DataLoader):
         beg_item = vocabulary[__BEG__]
         end_item = vocabulary[__END__]
         pad_item = vocabulary[__PAD__]
+        msk_item = vocabulary[__MSK__]
 
         for next_batch in self._sampler:
             max_in_len, max_out_len = (
-                max(len(self._dataset[i][j]) for j in next_batch) for i in range(2)
+                max(len(self._dataset[j][i]) for j in next_batch) for i in range(2)
             )
-            
-            """next_input = torch.ones(max_seq_len,
-                                    self.batch_size,
+
+            next_input = torch.ones(max_in_len,
+                                    len(next_batch),
                                     dtype=torch.int64).fill_(pad_item)
 
-            next_target = torch.ones(max_seq_len + 1,
-                                     self.batch_size,
+            next_target = torch.ones(max_out_len + 1,
+                                     len(next_batch),
                                      dtype=torch.int64).fill_(pad_item)
             next_target[0, :] = beg_item
 
-            next_output = torch.ones(max_seq_len + 1,
-                                     self.batch_size,
+            next_output = torch.ones(max_out_len + 1,
+                                     len(next_batch),
                                      dtype=torch.int64).fill_(pad_item)
 
             # ? If too much memory is used, merge output and target and move
             # ? further processing to the training loop
             for i, tensor_idx in enumerate(next_batch):
-                tensor = torch.Tensor(self._dataset[tensor_idx])
-                next_input[:len(tensor), i] = tensor
+                tensor_in, tensor_out = (torch.Tensor(i) for i in self._dataset[tensor_idx])
+                next_input[:len(tensor_in), i] = tensor_in
 
-                next_target[1:len(tensor) + 1, i] = tensor
+                next_target[1:len(tensor_out) + 1, i] = tensor_out
 
-                next_output[:len(tensor), i] = tensor
-                next_output[len(tensor), i] = end_item
-                if self.mask:
-                    rnd_mask_idx = self.mask_index_sample(len(tensor))
-                    next_input[rnd_mask_idx, i] = msk_item
+                next_output[:len(tensor_out), i] = tensor_out
+                next_output[len(tensor_out), i] = end_item
+                # if self.mask:
+                #     rnd_mask_idx = self.mask_index_sample(len(tensor_in))
+                #     next_input[rnd_mask_idx, i] = msk_item
 
             yield (next_input.to(self.device), next_target.to(self.device),
                    next_output.to(self.device))
-            """
 
     def __len__(self):
         if self.drop_last:
@@ -114,8 +118,7 @@ class DateLoader(torch.utils.data.DataLoader):
 def get_date_dataloader(
     dataset: DateDataset, batch_size: int
 ) -> torch.utils.data.DataLoader:
-    sampler = torch.utils.data.RandomSampler(dataset)
-    return PaddedBatchSampler(dataset, batch_size=batch_size, sampler=sampler)
+    return DateLoader(dataset, batch_size=batch_size)
 
 
 def generate_date() -> datetime.date:
@@ -152,8 +155,10 @@ def set_seed(seed=10):
 
 
 if __name__ == "__main__":
-    set_seed()
-    dataset = DateDataset(4)
-    data_loader = get_date_dataloader(dataset, 3)
+    set_seed(112)
+    dataset = DateDataset(6)
+    data_loader = get_date_dataloader(dataset, 5)
+    print(dataset._raw_dataset)
     for i in data_loader:
         print(i)
+        print(''.join(list(vocabulary.keys())[i[0][j, 0]] for j in range(len(i[0]))))
