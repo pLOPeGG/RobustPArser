@@ -14,11 +14,11 @@ class EncoderRNN(nn.Module):
         self.embedding = nn.Embedding(input_size, hidden_size)
         self.gru = nn.GRU(hidden_size, hidden_size)
 
-    def forward(self, input):
-        embedded = self.embedding(input)
-        output = embedded
-        output, hidden = self.gru(output)
-        return output, hidden
+    def forward(self, x):
+        
+        embedded = self.embedding(x.rename(None)).refine_names('I', 'B', 'H')
+        output, hidden = self.gru(embedded.rename(None))
+        return output.refine_names('I', 'B', 'H'), hidden.refine_names(..., 'B', 'H')
 
 
 class DecoderRNN(nn.Module):
@@ -29,17 +29,15 @@ class DecoderRNN(nn.Module):
         self.embedding = nn.Embedding(output_size, hidden_size)
         self.gru = nn.GRU(hidden_size, hidden_size)
         self.out = nn.Linear(hidden_size, output_size)
-        self.softmax = nn.LogSoftmax(dim=1)
+        self.softmax = nn.LogSoftmax(dim=-1)
 
-    def forward(self, input, hidden):
-        output = self.embedding(input)
+    def forward(self, x, hidden):
+        output = self.embedding(x.rename(None)).refine_names('O', 'B', 'H')
         output = F.relu(output)
-        output, hidden = self.gru(output, hidden)
-        output = self.softmax(self.out(output[0]))
-        return output, hidden
-
-    def initHidden(self):
-        return torch.zeros(1, 1, self.hidden_size, device=config.device)
+        output, hidden = self.gru(output.rename(None), hidden.rename(None))
+        output, hidden = output.refine_names('O', 'B', 'H'), hidden.refine_names(..., 'B', 'H')
+        output = self.softmax(self.out(output))
+        return output.refine_names(..., 'V'), hidden
 
 
 class AttnDecoderRNN(nn.Module):
@@ -65,7 +63,7 @@ class AttnDecoderRNN(nn.Module):
             self.attn(torch.cat((embedded, hidden), dim=-1)), dim=-1
         )
         attn_applied = torch.bmm(
-            attn_weights, encoder_outputs.unsqueeze(0)
+            torch.transpose(attn_weights, 0, 1), torch.transpose(encoder_outputs, 0, 1)
         )
 
         output = torch.cat((embedded, attn_applied), -1)

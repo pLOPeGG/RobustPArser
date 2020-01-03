@@ -80,15 +80,17 @@ class DateLoader(torch.utils.data.DataLoader):
 
             next_input = torch.ones(max_in_len,
                                     len(next_batch),
-                                    dtype=torch.int64).fill_(pad_item)
+                                    dtype=torch.int64,
+                                    names=('I', 'B')).fill_(pad_item)
 
-            next_target = torch.ones(max_out_len + 1,
-                                     len(next_batch),
-                                     dtype=torch.int64).fill_(pad_item)
-            next_target[0, :] = beg_item
+            # next_target = torch.ones(max_out_len + 1,
+            #                          len(next_batch),
+            #                          dtype=torch.int64).fill_(pad_item)
+            # next_target[0, :] = beg_item
 
             next_output = torch.ones(max_out_len + 1,
                                      len(next_batch),
+                                     names=('O', 'B'),
                                      dtype=torch.int64).fill_(pad_item)
 
             # ? If too much memory is used, merge output and target and move
@@ -97,22 +99,15 @@ class DateLoader(torch.utils.data.DataLoader):
                 tensor_in, tensor_out = (torch.Tensor(i) for i in self._dataset[tensor_idx])
                 next_input[:len(tensor_in), i] = tensor_in
 
-                next_target[1:len(tensor_out) + 1, i] = tensor_out
+                # next_target[1:len(tensor_out) + 1, i] = tensor_out
 
                 next_output[:len(tensor_out), i] = tensor_out
                 next_output[len(tensor_out), i] = end_item
-                # if self.mask:
-                #     rnd_mask_idx = self.mask_index_sample(len(tensor_in))
-                #     next_input[rnd_mask_idx, i] = msk_item
 
-            yield (next_input.to(self.device), next_target.to(self.device),
-                   next_output.to(self.device))
+            yield (next_input.to(self.device), next_output.to(self.device))
 
     def __len__(self):
-        if self.drop_last:
-            return len(self._sampler) // self.batch_size
-        else:
-            return (len(self._sampler) + self.batch_size - 1) // self.batch_size
+        return len(self._sampler)
 
 
 def get_date_dataloader(
