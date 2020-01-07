@@ -44,7 +44,7 @@ def teacher_forcing(decoder_hidden, encoder_output, target_tensor, decoder, crit
             target_tensor,
         ),
         dim=0,
-    ).refine_names("O", "B", "H")
+    ).refine_names("O", "B")
     decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden)
 
     loss += criterion(
@@ -52,7 +52,7 @@ def teacher_forcing(decoder_hidden, encoder_output, target_tensor, decoder, crit
         target_tensor.align_to("B", "O").rename(None),
     )
 
-    return loss / batch_size / target_length
+    return loss
 
 
 def greedy_decode_training(
@@ -76,10 +76,10 @@ def greedy_decode_training(
 
         loss += criterion(
             decoder_output.align_to("B", "V", "O").rename(None),
-            target_tensor.align_to("B", "O")[:, seq_pos].rename(None).unsqueeze(-1),
+            target_tensor.align_to("B", "O").rename(None)[:, seq_pos].unsqueeze(-1),
         )
 
-    return loss / batch_size / target_length
+    return loss
 
 
 def train(
@@ -113,7 +113,7 @@ def train(
     decoder_hidden = encoder_hidden
 
     # use_teacher_forcing = random.random() < teacher_forcing_ratio
-    use_teacher_forcing = False
+    use_teacher_forcing = True
 
     if use_teacher_forcing:
         loss = teacher_forcing(
@@ -137,12 +137,15 @@ def train_iters(
     encoder,
     decoder,
     n_epochs,
-    dataset,
-    print_every=1,
+    dataset: data.DateLoader,
     plot_every=1000,
     learning_rate=0.003,
 ):
     start = time.time()
+
+    encoder.train()
+    decoder.train()
+
     # plot_losses = []
     print_loss_total = 0  # Reset every print_every
     plot_loss_total = 0  # Reset every plot_every
@@ -161,12 +164,11 @@ def train_iters(
             print_loss_total += loss
             plot_loss_total += loss
 
-        if (epoch + 1) % print_every == 0:
-            print_loss_avg = print_loss_total / print_every
-            print_loss_total = 0
-            print(
-                f"[{epoch + 1}] {(epoch+1)/n_epochs*100:.2f}% ({datetime.timedelta(seconds=int(time.time()-start))!s}) | Loss={print_loss_avg:.5f}"
-            )
+        print_loss_avg = print_loss_total / len(dataset)
+        print_loss_total = 0
+        print(
+            f"[{epoch + 1}] {(epoch+1)/n_epochs*100:.2f}% ({datetime.timedelta(seconds=int(time.time()-start))!s}) | Loss={print_loss_avg:.5f}"
+        )
 
     #     if iter % plot_every == 0:
     #         plot_loss_avg = plot_loss_total / plot_every
@@ -176,14 +178,52 @@ def train_iters(
     # showPlot(plot_losses)
 
 
+def evaluate(encoder, decoder, dataset):
+    encoder.eval()
+    decoder.eval()
+    
+    rev_vocabulary = list(data.vocabulary.keys())
+
+    with torch.no_grad():
+        for x, y in dataset:
+            target_length = y.size(0)
+            batch_size = y.size(1)
+
+            encoder_output, encoder_hidden = encoder(x)
+            decoder_hidden = encoder_hidden
+            decoder_input_b = torch.full(
+                size=(1, batch_size),
+                fill_value=data.vocabulary[data.__BEG__],
+                dtype=torch.long,
+            )
+            decoder_hidden_b = decoder_hidden
+
+            pred_seq = []
+            for seq_pos in range(target_length):
+                decoder_output, decoder_hidden_b = decoder(
+                    decoder_input_b, decoder_hidden_b
+                )
+
+                topv, topi = decoder_output.rename(None).topk(1, dim=-1)
+                topi = topi.squeeze(-1).refine_names("O", "B")
+                decoder_input_b = topi.detach()  # detach from history as input
+
+                pred_seq.append(rev_vocabulary[decoder_input_b.item()])
+
+            print(f"PRD : {''.join(pred_seq)}")
+            print(f"TGT : {''.join(rev_vocabulary[i.item()] for i in y)}")
+            print(f"RAW : {''.join(rev_vocabulary[i.item()] for i in x)}")
+            print()
+
+
 def main():
-    data.set_seed(112)
+    data.set_seed()
 
     train_data_size = 10 ** 4
-    test_data_size = 10 ** 3
+    test_data_size = 10 ** 2
 
-    batch_size = 61
-    hidden_size = 128
+    batch_size = 64
+    hidden_size = 512
 
     dataset_train = data.get_date_dataloader(
         data.DateDataset(train_data_size), batch_size
@@ -195,13 +235,9 @@ def main():
         model.DecoderRNN(hidden_size, len(data.vocabulary)),
     )
 
-    train_iters(encoder, decoder, 10, dataset_train, 1, 1)
+    train_iters(encoder, decoder, 10, dataset_train)
 
-    # for _ in range(100):
-    #     words, target, attn = evaluate(encoder, decoder, dataset_test)
-
-    #     print(words)
-    #     print("".join(list(data.vocabulary.keys())[i] for i in target.squeeze()))
+    evaluate(encoder, decoder, dataset_test)
 
 
 if __name__ == "__main__":
