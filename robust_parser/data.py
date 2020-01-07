@@ -39,10 +39,7 @@ class DateDataset(torch.utils.data.Dataset):
 
         self._raw_dataset = [generate_date_pair() for _ in range(n)]
         self._dataset = [
-            (
-                [vocabulary[c] for c in x],
-                [vocabulary[c] for c in y],
-            )
+            ([vocabulary[c] for c in x], [vocabulary[c] for c in y],)
             for x, y in self._raw_dataset
         ]
 
@@ -78,30 +75,30 @@ class DateLoader(torch.utils.data.DataLoader):
                 max(len(self._dataset[j][i]) for j in next_batch) for i in range(2)
             )
 
-            next_input = torch.ones(max_in_len,
-                                    len(next_batch),
-                                    dtype=torch.int64,
-                                    names=('I', 'B')).fill_(pad_item)
+            next_input = torch.ones(
+                max_in_len, len(next_batch), dtype=torch.int64, names=("I", "B")
+            ).fill_(pad_item)
 
             # next_target = torch.ones(max_out_len + 1,
             #                          len(next_batch),
             #                          dtype=torch.int64).fill_(pad_item)
             # next_target[0, :] = beg_item
 
-            next_output = torch.ones(max_out_len + 1,
-                                     len(next_batch),
-                                     names=('O', 'B'),
-                                     dtype=torch.int64).fill_(pad_item)
+            next_output = torch.ones(
+                max_out_len + 1, len(next_batch), names=("O", "B"), dtype=torch.int64
+            ).fill_(pad_item)
 
             # ? If too much memory is used, merge output and target and move
             # ? further processing to the training loop
             for i, tensor_idx in enumerate(next_batch):
-                tensor_in, tensor_out = (torch.Tensor(i) for i in self._dataset[tensor_idx])
-                next_input[:len(tensor_in), i] = tensor_in
+                tensor_in, tensor_out = (
+                    torch.Tensor(i) for i in self._dataset[tensor_idx]
+                )
+                next_input[: len(tensor_in), i] = tensor_in
 
                 # next_target[1:len(tensor_out) + 1, i] = tensor_out
 
-                next_output[:len(tensor_out), i] = tensor_out
+                next_output[: len(tensor_out), i] = tensor_out
                 next_output[len(tensor_out), i] = end_item
 
             yield (next_input.to(self.device), next_output.to(self.device))
@@ -113,7 +110,7 @@ class DateLoader(torch.utils.data.DataLoader):
 def get_date_dataloader(
     dataset: DateDataset, batch_size: int
 ) -> torch.utils.data.DataLoader:
-    return DateLoader(dataset, batch_size=batch_size)
+    return DateLoader(dataset, batch_size=batch_size, drop_last=True)
 
 
 def generate_date() -> datetime.date:
@@ -127,7 +124,7 @@ def generate_date() -> datetime.date:
 def random_stringify_date(date: datetime.date) -> Date:
     sep_rnd = random.choice("-/. ")
 
-    pad_rnd = True if random.random() < 0.5 else False
+    pad_rnd = True if random.random() < 0.1 else False
 
     if pad_rnd:
         return f"{date.year}{sep_rnd}{date.month:02}{sep_rnd}{date.day:02}"
@@ -143,17 +140,22 @@ def generate_date_pair() -> Tuple[Date, ISODate]:
     return str_date, str(iso_date)
 
 
-def set_seed(seed=10):
+def set_seed(seed=None):
     if seed is not None:
+        random.seed(seed)
+        torch.manual_seed(seed)
+    else:
+        seed = int(time.time_ns())
+        print(seed)
         random.seed(seed)
         torch.manual_seed(seed)
 
 
 if __name__ == "__main__":
-    set_seed(112)
+    set_seed()
     dataset = DateDataset(6)
     data_loader = get_date_dataloader(dataset, 5)
     print(dataset._raw_dataset)
     for i in data_loader:
         print(i)
-        print(''.join(list(vocabulary.keys())[i[0][j, 0]] for j in range(len(i[0]))))
+        print("".join(list(vocabulary.keys())[i[0][j, 0]] for j in range(len(i[0]))))
