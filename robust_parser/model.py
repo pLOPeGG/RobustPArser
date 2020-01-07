@@ -6,6 +6,29 @@ from torch.nn import functional as F
 from robust_parser import config, data
 
 
+class MogrifierRNN(nn.Module):
+    def __init__(self, rnn_cell, n_mogrifying):
+        super().__init__()
+
+        self.cell = rnn_cell
+        self.n_mogrifying = n_mogrifying
+
+        m, n = rnn_cell.input_size, rnn_cell.hidden_size
+        k = min(m, n) // 2
+
+        self.Q_left = nn.ParameterList([nn.Parameter(torch.empty((m, k), dtype=torch.float, requires_grad=True)) for _ in range(n_mogrifying)])
+        self.Q_right = nn.ParameterList([nn.Parameter(torch.empty((k, n), dtype=torch.float, requires_grad=True)) for _ in range(n_mogrifying)])
+        self.R_left = nn.ParameterList([nn.Parameter(torch.empty((k, n), dtype=torch.float, requires_grad=True)) for _ in range(n_mogrifying)])
+        self.R_right = nn.ParameterList([nn.Parameter(torch.empty((m, k), dtype=torch.float, requires_grad=True)) for _ in range(n_mogrifying)])
+
+        self.init_weights()
+
+    def init_weights(self):
+        for w_l in [self.Q_left, self.Q_right, self.R_left, self.R_right]:
+            for w in w_l:
+                nn.init.xavier_uniform_(w)
+
+
 class EncoderRNN(nn.Module):
     def __init__(self, input_size, hidden_size):
         super(EncoderRNN, self).__init__()
@@ -15,10 +38,10 @@ class EncoderRNN(nn.Module):
         self.gru = nn.GRU(hidden_size, hidden_size)
 
     def forward(self, x):
-        
-        embedded = self.embedding(x.rename(None)).refine_names('I', 'B', 'H')
+
+        embedded = self.embedding(x.rename(None)).refine_names("I", "B", "H")
         output, hidden = self.gru(embedded.rename(None))
-        return output.refine_names('I', 'B', 'H'), hidden.refine_names(..., 'B', 'H')
+        return output.refine_names("I", "B", "H"), hidden.refine_names(..., "B", "H")
 
 
 class DecoderRNN(nn.Module):
@@ -29,15 +52,17 @@ class DecoderRNN(nn.Module):
         self.embedding = nn.Embedding(output_size, hidden_size)
         self.gru = nn.GRU(hidden_size, hidden_size)
         self.out = nn.Linear(hidden_size, output_size)
-        self.softmax = nn.LogSoftmax(dim=-1)
 
     def forward(self, x, hidden):
-        output = self.embedding(x.rename(None)).refine_names('O', 'B', 'H')
+        output = self.embedding(x.rename(None)).refine_names("O", "B", "H")
         output = F.relu(output)
         output, hidden = self.gru(output.rename(None), hidden.rename(None))
-        output, hidden = output.refine_names('O', 'B', 'H'), hidden.refine_names(..., 'B', 'H')
-        output = self.softmax(self.out(output))
-        return output.refine_names(..., 'V'), hidden
+        output, hidden = (
+            output.refine_names("O", "B", "H"),
+            hidden.refine_names(..., "B", "H"),
+        )
+        output = F.LogSoftmax(self.out(output), dim=-1)
+        return output.refine_names(..., "V"), hidden
 
 
 class AttnDecoderRNN(nn.Module):
@@ -80,7 +105,7 @@ class AttnDecoderRNN(nn.Module):
 
 
 if __name__ == "__main__":
-    data.set_seed(112)
+    data.set_seed()
 
     batch_size = 4
     hidden_size = 100
