@@ -90,7 +90,7 @@ def train(
     encoder_optimizer,
     decoder_optimizer,
     criterion,
-    max_length=20,
+    max_length=20
 ):
 
     encoder_optimizer.zero_grad()
@@ -140,11 +140,16 @@ def train_iters(
     dataset: data.DateLoader,
     plot_every=1000,
     learning_rate=0.003,
+    gradient_clip=10
 ):
     start = time.time()
 
     encoder.train()
     decoder.train()
+
+    for model in [encoder, decoder]:
+        for p in model.parameters():
+            p.register_hook(lambda grad: torch.clamp(grad, -gradient_clip, gradient_clip))
 
     # plot_losses = []
     print_loss_total = 0  # Reset every print_every
@@ -185,6 +190,7 @@ def evaluate(encoder, decoder, dataset):
     rev_vocabulary = list(data.vocabulary.keys())
 
     with torch.no_grad():
+        count_ok = 0
         for x, y in dataset:
             target_length = y.size(0)
             batch_size = y.size(1)
@@ -208,22 +214,29 @@ def evaluate(encoder, decoder, dataset):
                 topi = topi.squeeze(-1).refine_names("O", "B")
                 decoder_input_b = topi.detach()  # detach from history as input
 
-                pred_seq.append(rev_vocabulary[decoder_input_b.item()])
+                pred_seq.append(decoder_input_b.item())
 
-            print(f"PRD : {''.join(pred_seq)}")
-            print(f"TGT : {''.join(rev_vocabulary[i.item()] for i in y)}")
-            print(f"RAW : {''.join(rev_vocabulary[i.item()] for i in x)}")
-            print()
+            if any(p != yy.item() for p, yy in zip(pred_seq, y)):
+                print(f"PRD : {''.join(rev_vocabulary[i] for i in pred_seq)}")
+                print(f"TGT : {''.join(rev_vocabulary[i.item()] for i in y)}")
+                print(f"RAW : {''.join(rev_vocabulary[i.item()] for i in x)}")
+                print()
+            else:
+                count_ok += 1
+                
+        print(f"[ACCURACY]: {count_ok / len(dataset)}")
 
 
 def main():
     data.set_seed()
 
     train_data_size = 10 ** 4
-    test_data_size = 10 ** 2
+    test_data_size = 10 ** 3
 
     batch_size = 64
-    hidden_size = 512
+    hidden_size = 128
+    
+    gradient_clip = 10
 
     dataset_train = data.get_date_dataloader(
         data.DateDataset(train_data_size), batch_size
@@ -232,7 +245,7 @@ def main():
 
     encoder, decoder = (
         model.EncoderRNN(len(data.vocabulary), hidden_size),
-        model.DecoderRNN(hidden_size, len(data.vocabulary)),
+        model.DecoderMogrifierRNN(hidden_size, len(data.vocabulary)),
     )
 
     train_iters(encoder, decoder, 10, dataset_train)
