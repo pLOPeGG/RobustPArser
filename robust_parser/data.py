@@ -124,12 +124,13 @@ def generate_date() -> datetime.date:
 def random_stringify_date(date: datetime.date) -> Date:
     sep_rnd = random.choice("-/. ")
 
-    pad_rnd = True if random.random() < 0.1 else False
+    pad_rnd = "" if random.random() < 0.1 else "02"
+    fmt_rnd = random.choice([
+        "{date.year}{sep_rnd}{date.month:{pad_rnd}}{sep_rnd}{date.day:{pad_rnd}}",
+        "{date.day:{pad_rnd}}{sep_rnd}{date.month:{pad_rnd}}{sep_rnd}{date.year}"
+    ])
 
-    if pad_rnd:
-        return f"{date.year}{sep_rnd}{date.month:02}{sep_rnd}{date.day:02}"
-    else:
-        return f"{date.year}{sep_rnd}{date.month}{sep_rnd}{date.day}"
+    return fmt_rnd.format(date=date, pad_rnd=pad_rnd, sep_rnd=sep_rnd)
 
 
 def generate_date_pair() -> Tuple[Date, ISODate]:
