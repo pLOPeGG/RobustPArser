@@ -8,6 +8,7 @@ import torch
 from torch import nn, optim
 
 from robust_parser import data, model, config
+from robust_parser.model_lab import mogrifier
 
 import tqdm
 import matplotlib.pyplot as plt
@@ -82,6 +83,15 @@ def greedy_decode_training(
     return loss
 
 
+def L2_regularize(model_l, l2_penalty=10**-4):
+    loss_reg = 0
+    crit = nn.MSELoss()
+    for m in model_l:
+        for p in m.parameters():
+            loss_reg += crit(p, torch.zeros_like(p))
+    return l2_penalty * loss_reg
+
+
 def train(
     input_tensor,
     target_tensor,
@@ -125,6 +135,8 @@ def train(
             decoder_hidden, encoder_output, target_tensor, decoder, criterion
         )
 
+    loss += L2_regularize([encoder, decoder])
+
     loss.backward()
 
     encoder_optimizer.step()
@@ -138,7 +150,9 @@ def train_iters(
     decoder,
     n_epochs,
     dataset: data.DateLoader,
-    plot_every=1000,
+    dataset_test: data.DateLoader,
+    *,
+    eval_every=2,
     learning_rate=0.003,
     gradient_clip=10
 ):
@@ -147,16 +161,17 @@ def train_iters(
     encoder.train()
     decoder.train()
 
-    for model in [encoder, decoder]:
-        for p in model.parameters():
-            p.register_hook(lambda grad: torch.clamp(grad, -gradient_clip, gradient_clip))
+    if gradient_clip is not None:
+        for model in [encoder, decoder]:
+            for p in model.parameters():
+                p.register_hook(lambda grad: torch.clamp(grad, -gradient_clip, gradient_clip))
 
     # plot_losses = []
     print_loss_total = 0  # Reset every print_every
     plot_loss_total = 0  # Reset every plot_every
 
-    encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
-    decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate)
+    encoder_optimizer = optim.AdamW(encoder.parameters(), lr=learning_rate)
+    decoder_optimizer = optim.AdamW(decoder.parameters(), lr=learning_rate)
 
     criterion = nn.NLLLoss(ignore_index=data.vocabulary[data.__PAD__])
 
@@ -172,8 +187,11 @@ def train_iters(
         print_loss_avg = print_loss_total / len(dataset)
         print_loss_total = 0
         print(
-            f"[{epoch + 1}] {(epoch+1)/n_epochs*100:.2f}% ({datetime.timedelta(seconds=int(time.time()-start))!s}) | Loss={print_loss_avg:.5f}"
+            f"[{epoch + 1}] {(epoch+1)/n_epochs*100:4.2f}% ({datetime.timedelta(seconds=int(time.time()-start))!s}) | Loss={print_loss_avg:.5f}"
         )
+        
+        if (epoch + 1) % eval_every == 0:
+            evaluate(encoder, decoder, dataset_test, criterion, verbose=True)
 
     #     if iter % plot_every == 0:
     #         plot_loss_avg = plot_loss_total / plot_every
@@ -183,14 +201,16 @@ def train_iters(
     # showPlot(plot_losses)
 
 
-def evaluate(encoder, decoder, dataset):
+def evaluate(encoder, decoder, dataset, criterion, *, verbose=False):
     encoder.eval()
     decoder.eval()
     
     rev_vocabulary = list(data.vocabulary.keys())
 
     with torch.no_grad():
+        errors = []
         count_ok = 0
+        loss = 0
         for x, y in dataset:
             target_length = y.size(0)
             batch_size = y.size(1)
@@ -205,7 +225,7 @@ def evaluate(encoder, decoder, dataset):
             decoder_hidden_b = decoder_hidden
 
             pred_seq = []
-            for seq_pos in range(target_length):
+            for seq_pos in range(target_length):  # Factor with greedy_decode
                 decoder_output, decoder_hidden_b = decoder(
                     decoder_input_b, decoder_hidden_b
                 )
@@ -214,29 +234,36 @@ def evaluate(encoder, decoder, dataset):
                 topi = topi.squeeze(-1).refine_names("O", "B")
                 decoder_input_b = topi.detach()  # detach from history as input
 
+                loss += criterion(
+                    decoder_output.align_to("B", "V", "O").rename(None),
+                    y.align_to("B", "O").rename(None)[:, seq_pos].unsqueeze(-1),
+                )
+
                 pred_seq.append(decoder_input_b.item())
 
             if any(p != yy.item() for p, yy in zip(pred_seq, y)):
-                print(f"PRD : {''.join(rev_vocabulary[i] for i in pred_seq)}")
-                print(f"TGT : {''.join(rev_vocabulary[i.item()] for i in y)}")
-                print(f"RAW : {''.join(rev_vocabulary[i.item()] for i in x)}")
-                print()
+                if verbose:
+                    errors.append((f"PRD : {''.join(rev_vocabulary[i] for i in pred_seq)}",
+                                   f"TGT : {''.join(rev_vocabulary[i.item()] for i in y)}",
+                                   f"RAW : {''.join(rev_vocabulary[i.item()] for i in x)}",
+                                   "\n"))
             else:
                 count_ok += 1
-                
+        print(*("\n".join(i) for i in random.choices(errors, k=min(10, len(errors)))))
         print(f"[ACCURACY]: {count_ok / len(dataset)}")
+        print(f"[LOSS]: {loss / len(dataset)}")
 
 
 def main():
     data.set_seed()
 
-    train_data_size = 10 ** 4
+    train_data_size = 3 * 10 ** 3
     test_data_size = 10 ** 3
 
-    batch_size = 64
-    hidden_size = 128
-    
-    gradient_clip = 10
+    batch_size = 32
+    hidden_size = 256
+
+    gradient_clip = 1
 
     dataset_train = data.get_date_dataloader(
         data.DateDataset(train_data_size), batch_size
@@ -244,13 +271,16 @@ def main():
     dataset_test = data.get_date_dataloader(data.DateDataset(test_data_size), 1)
 
     encoder, decoder = (
+        # mogrifier.EncoderMogrifierRNN(len(data.vocabulary), hidden_size, 3),
         model.EncoderRNN(len(data.vocabulary), hidden_size),
-        model.DecoderMogrifierRNN(hidden_size, len(data.vocabulary)),
+        # mogrifier.DecoderMogrifierRNN(hidden_size, len(data.vocabulary), 3),
+        model.DecoderRNN(hidden_size, len(data.vocabulary)),
     )
 
-    train_iters(encoder, decoder, 10, dataset_train)
+    train_iters(encoder, decoder, 10, dataset_train, dataset_test, gradient_clip=None)
 
-    evaluate(encoder, decoder, dataset_test)
+    return encoder, decoder
+    
 
 
 if __name__ == "__main__":
