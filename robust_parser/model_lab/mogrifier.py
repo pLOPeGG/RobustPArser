@@ -18,7 +18,7 @@ class MogrifierRNN(nn.Module):
 
         self.n_mogrifying = n_mogrifying
 
-        self.m, self.n = rnn_cell.input_size, rnn_cell.hidden_size
+        self.m, self.n = rnn_cell.hidden_size, rnn_cell.input_size
 
         self.k = max(20, min(self.m, self.n) // 16)
 
@@ -38,7 +38,7 @@ class MogrifierRNN(nn.Module):
 
         for w_l in [self.Q_left, self.Q_right, self.R_left, self.R_right]:
             for w in w_l:
-                nn.init.xavier_uniform_(w)
+                nn.init.xavier_uniform_(w.data)
 
     def mogrify(self, xx, hidden):
         if self.deal_tuple_hidden:
@@ -49,18 +49,18 @@ class MogrifierRNN(nn.Module):
         r_iter = zip(self.R_left, self.R_right)
         for q_l, q_r in zip(self.Q_left, self.Q_right):
             q = q_l @ q_r
-            xx = 2 * torch.sigmoid(torch.matmul(q, h.unsqueeze(-1)).squeeze(-1)) * xx
+            xx = 2 * torch.sigmoid(h @ q) * xx
 
             try:
                 r_l, r_r = next(r_iter)
                 r = r_l @ r_r
-                h = 2 * torch.sigmoid(torch.matmul(r, xx.unsqueeze(-1)).squeeze(-1)) * h
+                h = 2 * torch.sigmoid(xx @ r) * h
             except StopIteration:
                 pass
         try:
             r_l, r_r = next(r_iter)
             r = r_l @ r_r
-            h = 2 * torch.sigmoid(torch.matmul(r, xx.unsqueeze(-1)).squeeze(-1)) * h
+            h = 2 * torch.sigmoid(xx @ r) * h
         except StopIteration:
             pass
         finally:
@@ -75,12 +75,12 @@ class MogrifierRNN(nn.Module):
         if hidden is None:
             if self.deal_tuple_hidden:
                 hidden = (
-                    torch.zeros(batch_size, self.n),
-                    torch.zeros(batch_size, self.n),
+                    torch.zeros(batch_size, self.m),
+                    torch.zeros(batch_size, self.m),
                 )
             else:
-                hidden = torch.zeros(batch_size, self.n)
-        else:
+                hidden = torch.zeros(batch_size, self.m)
+        elif not isinstance(hidden, tuple):
             num_dims = len(hidden.size())
             if num_dims != 2:
                 assert (
@@ -90,11 +90,13 @@ class MogrifierRNN(nn.Module):
                     hidden = (hidden.squeeze(0), torch.zeros_like(hidden.squeeze(0)))
                 else:
                     hidden = hidden.squeeze(0)
+        else:
+            hidden = (hidden[0].squeeze(0), hidden[1].squeeze(0))
 
-        output = torch.empty((seq_len, batch_size, self.n))
+        output = torch.empty((seq_len, batch_size, self.m))
         for seq_idx, xx in enumerate(x):
 
-            xx, hidden = self.mogrify(xx, hidden)
+            # xx, hidden = self.mogrify(xx, hidden)
 
             hidden = self.cell(xx, hidden)
 
@@ -136,7 +138,7 @@ class MogrifierRNNShort(MogrifierRNN):
             # fmt: on
 
             for w in [self.Q, self.R]:
-                nn.init.xavier_uniform_(w)
+                nn.init.xavier_uniform_(w.data)
 
     def mogrify(self, xx, hidden):
         if self.deal_tuple_hidden:
@@ -153,11 +155,11 @@ class MogrifierRNNShort(MogrifierRNN):
         for i in range(1, self.n_mogrifying + 1):
             if i % 2 == 0:
                 h = (
-                    2 * torch.sigmoid(torch.matmul(R, xx.unsqueeze(-1)).squeeze(-1))
+                    2 * torch.sigmoid(xx @ R)
                 ) * h
             else:
                 xx = (
-                    2 * torch.sigmoid(torch.matmul(Q, h.unsqueeze(-1)).squeeze(-1))
+                    2 * torch.sigmoid(h @ Q)
                 ) * xx
 
         if self.deal_tuple_hidden:
@@ -173,6 +175,7 @@ class EncoderMogrifierRNN(model.EncoderRNN):
             nn.LSTMCell(hidden_size, hidden_size), n_mogrifying
         )
         # self.rnn = MogrifierRNNGit(hidden_size, hidden_size, n_mogrifying)
+        # self.rnn = OptimizedLSTM(hidden_size, hidden_size)
 
 
 class DecoderMogrifierRNN(model.DecoderRNN):
@@ -183,6 +186,8 @@ class DecoderMogrifierRNN(model.DecoderRNN):
             nn.LSTMCell(hidden_size, hidden_size), n_mogrifying
         )
         # self.rnn = MogrifierRNNGit(hidden_size, hidden_size, n_mogrifying)
+        # self.rnn = OptimizedLSTM(hidden_size, hidden_size)
+        
 
 
 class MogrifierLSTMCellGit(nn.Module):
@@ -271,6 +276,60 @@ class MogrifierRNNGit(nn.Module):
 
         hidden = tuple(h.unsqueeze(0) for h in hidden)
         return output, hidden
+
+
+class OptimizedLSTM(nn.Module):
+    def __init__(self, input_sz: int, hidden_sz: int):
+        super().__init__()
+        self.input_sz = input_sz
+        self.hidden_size = hidden_sz
+        self.weight_ih = nn.Parameter(torch.Tensor(input_sz, hidden_sz * 4))
+        self.weight_hh = nn.Parameter(torch.Tensor(hidden_sz, hidden_sz * 4))
+        self.bias = nn.Parameter(torch.Tensor(hidden_sz * 4))
+        self.init_weights()
+     
+    def init_weights(self):
+        std = 1.0 / self.hidden_size ** 0.5
+        for p in self.parameters():
+            if p.data.ndimension() >= 2:
+                nn.init.xavier_uniform_(p.data)
+            else:
+                nn.init.uniform_(p.data, -std, std)
+         
+    def forward(self, x: torch.Tensor,
+                init_states=None
+               ):
+        """Assumes x is of shape (batch, sequence, feature)"""
+        x = x.transpose(1, 0)
+        bs, seq_sz, _ = x.size()
+        hidden_seq = []
+        if init_states is None:
+            h_t, c_t = (torch.zeros(self.hidden_size).to(x.device),
+                        torch.zeros(self.hidden_size).to(x.device))
+        elif not isinstance(init_states, tuple):
+            h_t = init_states
+            c_t = torch.zeros(self.hidden_size).to(x.device)
+        else:
+            h_t, c_t = init_states
+         
+        HS = self.hidden_size
+        for t in range(seq_sz):
+            x_t = x[:, t, :]
+            # batch the computations into a single matrix multiplication
+            gates = x_t @ self.weight_ih + h_t @ self.weight_hh + self.bias
+            i_t, f_t, g_t, o_t = (
+                torch.sigmoid(gates[:, :HS]), # input
+                torch.sigmoid(gates[:, HS:HS*2]), # forget
+                torch.tanh(gates[:, HS*2:HS*3]),
+                torch.sigmoid(gates[:, HS*3:]), # output
+            )
+            c_t = f_t * c_t + i_t * g_t
+            h_t = o_t * torch.tanh(c_t)
+            hidden_seq.append(h_t.unsqueeze(1))
+        hidden_seq = torch.cat(hidden_seq, dim=1)
+        # reshape from shape (sequence, batch, feature) to (batch, sequence, feature)
+        hidden_seq = hidden_seq.transpose(1, 0).contiguous()
+        return hidden_seq, (h_t, c_t)
 
 
 def test_mogrifier():
