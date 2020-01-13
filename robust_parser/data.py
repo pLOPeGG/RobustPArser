@@ -64,6 +64,11 @@ class DateLoader(torch.utils.data.DataLoader):
             drop_last=self.drop_last,
         )
 
+    def redraw_dataset(self, n=None):
+        if n is None:
+            n = len(self._dataset)
+        self._dataset = DateDataset(n)
+
     def __iter__(self):
         beg_item = vocabulary[__BEG__]
         end_item = vocabulary[__END__]
@@ -124,7 +129,7 @@ def generate_date() -> datetime.date:
 def random_stringify_date(date: datetime.date) -> Date:
     sep_rnd = random.choice("-/. ")
 
-    pad_rnd = "" if random.random() < 0.1 else "02"
+    pad_rnd = "" if random.random() < 0.8 else "02"
     fmt_rnd = random.choice([
         "{date.year}{sep_rnd}{date.month:{pad_rnd}}{sep_rnd}{date.day:{pad_rnd}}",
         "{date.day:{pad_rnd}}{sep_rnd}{date.month:{pad_rnd}}{sep_rnd}{date.year}"
