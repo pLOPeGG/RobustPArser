@@ -27,7 +27,7 @@ def showPlot(points):
     plt.plot(points)
 
 
-teacher_forcing_ratio = 0.5
+teacher_forcing_ratio = 0.8
 
 
 def teacher_forcing(decoder_hidden, encoder_output, target_tensor, decoder, criterion):
@@ -42,18 +42,38 @@ def teacher_forcing(decoder_hidden, encoder_output, target_tensor, decoder, crit
                 fill_value=data.vocabulary[data.__BEG__],
                 dtype=torch.long,
             ),
-            target_tensor,
+            target_tensor[:-1, ...],
         ),
         dim=0,
     ).refine_names("O", "B")
     decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden)
 
     loss += criterion(
-        decoder_output[:-1, ...].align_to("B", "V", "O").rename(None),
+        decoder_output.align_to("B", "V", "O").rename(None),
         target_tensor.align_to("B", "O").rename(None),
     )
 
     return loss
+
+
+def greedy_decode(decoder, decoder_input, decoder_hidden, criterion, target_tensor):
+    target_length = target_tensor.size(0)
+    pred_seq = []
+    loss = 0
+    for seq_pos in range(target_length):
+        decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden)
+
+        topv, topi = decoder_output.rename(None).topk(1, dim=-1)
+        topi = topi.squeeze(-1).refine_names("O", "B")
+        decoder_input = topi.detach()  # detach from history as input
+
+        loss += criterion(
+            decoder_output.align_to("B", "V", "O").rename(None),
+            target_tensor.align_to("B", "O").rename(None)[:, seq_pos].unsqueeze(-1),
+        )
+        pred_seq.append(decoder_input.squeeze().numpy())
+
+    return loss, pred_seq
 
 
 def greedy_decode_training(
@@ -68,17 +88,7 @@ def greedy_decode_training(
     )
     decoder_hidden_b = decoder_hidden
 
-    for seq_pos in range(target_length):
-        decoder_output, decoder_hidden_b = decoder(decoder_input_b, decoder_hidden_b)
-
-        topv, topi = decoder_output.rename(None).topk(1, dim=-1)
-        topi = topi.squeeze(-1).refine_names("O", "B")
-        decoder_input_b = topi.detach()  # detach from history as input
-
-        loss += criterion(
-            decoder_output.align_to("B", "V", "O").rename(None),
-            target_tensor.align_to("B", "O").rename(None)[:, seq_pos].unsqueeze(-1),
-        )
+    loss, _ = greedy_decode(decoder, decoder_input_b, decoder_hidden_b, criterion, target_tensor)
 
     return loss
 
@@ -122,8 +132,7 @@ def train(
 
     decoder_hidden = encoder_hidden
 
-    # use_teacher_forcing = random.random() < teacher_forcing_ratio
-    use_teacher_forcing = True
+    use_teacher_forcing = random.random() < teacher_forcing_ratio
 
     if use_teacher_forcing:
         loss = teacher_forcing(
@@ -153,14 +162,14 @@ def train_iters(
     dataset_test: data.DateLoader,
     *,
     eval_every=2,
-    learning_rate=0.003,
-    gradient_clip=10
+    learning_rate=0.003
 ):
     start = time.time()
 
     encoder.train()
     decoder.train()
 
+    gradient_clip = 10
     if gradient_clip is not None:
         for model in [encoder, decoder]:
             for p in model.parameters():
@@ -176,6 +185,7 @@ def train_iters(
     criterion = nn.NLLLoss(ignore_index=data.vocabulary[data.__PAD__])
 
     for epoch in range(n_epochs):
+        dataset.redraw_dataset()
         for x, y in tqdm.tqdm(dataset):
 
             loss = train(
@@ -189,10 +199,11 @@ def train_iters(
         print(
             f"[{epoch + 1}] {(epoch+1)/n_epochs*100:4.2f}% ({datetime.timedelta(seconds=int(time.time()-start))!s}) | Loss={print_loss_avg:.5f}"
         )
-        
+
         if (epoch + 1) % eval_every == 0:
             evaluate(encoder, decoder, dataset_test, criterion, verbose=True)
 
+    return evaluate(encoder, decoder, dataset_test, criterion)
     #     if iter % plot_every == 0:
     #         plot_loss_avg = plot_loss_total / plot_every
     #         plot_losses.append(plot_loss_avg)
@@ -224,23 +235,10 @@ def evaluate(encoder, decoder, dataset, criterion, *, verbose=False):
             )
             decoder_hidden_b = decoder_hidden
 
-            pred_seq = []
-            for seq_pos in range(target_length):  # Factor with greedy_decode
-                decoder_output, decoder_hidden_b = decoder(
-                    decoder_input_b, decoder_hidden_b
-                )
+            local_loss, pred_seq = greedy_decode(decoder, decoder_input_b, decoder_hidden_b, criterion, y)
 
-                topv, topi = decoder_output.rename(None).topk(1, dim=-1)
-                topi = topi.squeeze(-1).refine_names("O", "B")
-                decoder_input_b = topi.detach()  # detach from history as input
-
-                loss += criterion(
-                    decoder_output.align_to("B", "V", "O").rename(None),
-                    y.align_to("B", "O").rename(None)[:, seq_pos].unsqueeze(-1),
-                )
-
-                pred_seq.append(decoder_input_b.item())
-
+            loss += local_loss
+            
             if any(p != yy.item() for p, yy in zip(pred_seq, y)):
                 if verbose:
                     errors.append((f"PRD : {''.join(rev_vocabulary[i] for i in pred_seq)}",
@@ -252,18 +250,48 @@ def evaluate(encoder, decoder, dataset, criterion, *, verbose=False):
         print(*("\n".join(i) for i in random.choices(errors, k=min(10, len(errors)))))
         print(f"[ACCURACY]: {count_ok / len(dataset)}")
         print(f"[LOSS]: {loss / len(dataset)}")
+        
+        return loss.item()
+
+     
+def train_eval(parameters):
+    learning_rate = parameters["learning_rate"]
+    hidden_size = parameters["hidden_size"]
+    n_mogrify = parameters["n_mogrify"]
+    
+    data.set_seed()
+
+    train_data_size = 5 * 10 ** 3
+    test_data_size = 10 ** 3
+
+    batch_size = 64
+
+    dataset_train = data.get_date_dataloader(
+        data.DateDataset(train_data_size), batch_size
+    )
+    dataset_test = data.get_date_dataloader(data.DateDataset(test_data_size), 1)
+
+    encoder, decoder = (à
+        mogrifier.EncoderMogrifierRNN(len(data.vocabulary), hidden_size, n_mogrify),
+        # model.EncoderRNN(len(data.vocabulary), hidden_size),
+        mogrifier.DecoderMogrifierRNN(hidden_size, len(data.vocabulary), n_mogrify),
+        # model.DecoderRNN(hidden_size, len(data.vocabulary)),
+    )
+
+    return train_iters(encoder, decoder, 10, dataset_train, dataset_test, eval_every=20, learning_rate=learning_rate)
+    
 
 
 def main():
     data.set_seed()
 
-    train_data_size = 3 * 10 ** 3
+    train_data_size = 5 * 10 ** 3
     test_data_size = 10 ** 3
 
-    batch_size = 32
+    batch_size = 64
     hidden_size = 256
 
-    gradient_clip = 1
+    
 
     dataset_train = data.get_date_dataloader(
         data.DateDataset(train_data_size), batch_size
@@ -271,17 +299,36 @@ def main():
     dataset_test = data.get_date_dataloader(data.DateDataset(test_data_size), 1)
 
     encoder, decoder = (
-        # mogrifier.EncoderMogrifierRNN(len(data.vocabulary), hidden_size, 3),
-        model.EncoderRNN(len(data.vocabulary), hidden_size),
-        # mogrifier.DecoderMogrifierRNN(hidden_size, len(data.vocabulary), 3),
-        model.DecoderRNN(hidden_size, len(data.vocabulary)),
+        mogrifier.EncoderMogrifierRNN(len(data.vocabulary), hidden_size, 6),
+        # model.EncoderRNN(len(data.vocabulary), hidden_size),
+        mogrifier.DecoderMogrifierRNN(hidden_size, len(data.vocabulary), 6),
+        # model.DecoderRNN(hidden_size, len(data.vocabulary)),
     )
 
-    train_iters(encoder, decoder, 10, dataset_train, dataset_test, gradient_clip=None)
+    train_iters(encoder, decoder, 5, dataset_train, dataset_test)
 
     return encoder, decoder
-    
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    # train_eval({"learning_rate": 0.001, "n_mogrify": 3, "hidden_size": 32})
+    
+    from ax.plot.contour import plot_contour
+    from ax.plot.trace import optimization_trace_single_method
+    from ax.service.managed_loop import optimize
+    from ax.utils.notebook.plotting import render, init_notebook_plotting
+    
+    best_parameters, values, experiment, model = optimize(
+        parameters=[
+            {"name": "learning_rate", "value_type": "float", "type": "range", "bounds": [1e-6, 0.4], "log_scale": True},
+            {"name": "n_mogrify", "value_type": "int", "type": "range", "bounds": [0, 10]},
+            {"name": "hidden_size", "value_type": "int", "type": "range", "bounds": [10, 256]},
+        ],
+        evaluation_function=train_eval,
+        objective_name='loss',
+        minimize=True,
+        total_trials=10
+    )
+    
+    print(best_parameters, values, experiment, model)
