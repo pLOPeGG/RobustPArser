@@ -27,6 +27,7 @@ vocabulary = {
     __MSK__: 3,
     **{c: i for i, c in enumerate(charset, 4)},
 }
+rev_vocabulary = list(vocabulary.keys())
 
 
 class DateDataset(torch.utils.data.Dataset):
