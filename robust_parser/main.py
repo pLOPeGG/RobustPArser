@@ -29,6 +29,9 @@ def showPlot(points):
 
 def train_eval(parameters):
     data.set_seed()
+    
+    hyper_opt = parameters.get("hyper_opt", True)
+    
     encoder_cls = parameters.get("encoder_cls", model.EncoderRNN)
     decoder_cls = parameters.get("decoder_cls", model.DecoderRNN)
 
@@ -69,7 +72,7 @@ def train_eval(parameters):
 
     evaluation = m.evaluate(dataset_test)
     print(parameters, evaluation, sep='\n')
-    return evaluation["loss"]
+    return evaluation["loss"] if hyper_opt else (m, evaluation)
 
 
 def hyper_opt():
@@ -121,11 +124,15 @@ def hyper_opt():
 
 def main():
     # hyper_opt()
-    train_eval({
+    m, e = train_eval({
         "decoder_cls": attn_decoder.AttnDecoderRNN,
-        "decoder_prm": {}
-        
+        "hyper_opt": False
     })
+    
+    dataset = data.get_date_dataloader(data.DateDataset(10), 2)
+    
+    for x, y in dataset:
+        print(m(x, return_attn=True))
 
 
 if __name__ == "__main__":
