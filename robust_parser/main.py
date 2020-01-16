@@ -8,7 +8,7 @@ import torch
 from torch import nn, optim
 
 from robust_parser import data, model, config
-from robust_parser.model_lab import mogrifier
+from robust_parser.model_lab import mogrifier, attn_decoder
 
 import tqdm
 import matplotlib.pyplot as plt
@@ -120,7 +120,12 @@ def hyper_opt():
 
 
 def main():
-    hyper_opt()
+    # hyper_opt()
+    train_eval({
+        "decoder_cls": attn_decoder.AttnDecoderRNN,
+        "decoder_prm": {}
+        
+    })
 
 
 if __name__ == "__main__":
