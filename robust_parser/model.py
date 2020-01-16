@@ -19,7 +19,7 @@ class EncoderDecoderModel(nn.Module):
 
         encoder_cls = kwargs.get("encoder_cls", EncoderRNN)
         decoder_cls = kwargs.get("decoder_cls", DecoderRNN)
-        
+
         encoder_prm = kwargs.get("encoder_prm", {})
         decoder_prm = kwargs.get("decoder_prm", {})
 
@@ -73,18 +73,24 @@ class EncoderDecoderModel(nn.Module):
         ).refine_names("O", "B")
 
         for seq_pos in range(target_length):
-            dec_output, dec_hidden = self.decoder(dec_input[seq_pos, ...], dec_hidden, enc_out, input_mask)
+            dec_output, dec_hidden = self.decoder(
+                dec_input[seq_pos, ...], dec_hidden, enc_out, input_mask
+            )
 
             loss += self.criterion(
                 dec_output.align_to("B", "V", "O").rename(None),
-                tgt_tensor.align_to("B", "O")
-                .rename(None)[:, seq_pos]
-                .unsqueeze(-1),
+                tgt_tensor.align_to("B", "O").rename(None)[:, seq_pos].unsqueeze(-1),
             )
         return loss
 
-    def _greedy_decode(self, enc_out, dec_hidden, input_mask, tgt_tensor=None):
+    def _greedy_decode(
+        self, enc_out, dec_hidden, input_mask, *, tgt_tensor=None, store_attn=False
+    ):
         batch_size = enc_out.size(1)
+
+        if store_attn:
+            assert tgt_tensor is None
+            assert hasattr(self.decoder, "attn")
 
         if tgt_tensor is not None:
             loss = 0
@@ -100,12 +106,20 @@ class EncoderDecoderModel(nn.Module):
             dtype=torch.long,
         ).refine_names("O", "B")
 
+        if store_attn:
+            attn_l = []
+
         for seq_pos in range(max_seq_len):
-            dec_output, dec_hidden = self.decoder(dec_input, dec_hidden, enc_out, input_mask)
+            dec_output, dec_hidden = self.decoder(
+                dec_input, dec_hidden, enc_out, input_mask
+            )
 
             _, topi = dec_output.rename(None).topk(1, dim=-1)
             topi = topi.squeeze(-1).refine_names("O", "B")
             dec_input = topi.detach()  # detach from history as input
+
+            if store_attn:
+                attn_l.append(self.decoder.attn.alphas)
 
             if tgt_tensor is not None:
                 loss += self.criterion(
@@ -117,17 +131,30 @@ class EncoderDecoderModel(nn.Module):
 
             pred_seq[seq_pos] = dec_input.squeeze(0).numpy()
 
-        return pred_seq if tgt_tensor is None else (pred_seq, loss)
+        if store_attn:
+            attn_array = np.empty((len(attn_l), *attn_l[0].size()))
+            for i, attn_val in enumerate(attn_l):
+                attn_array[i] = attn_val.detach().numpy()
 
-    def forward(self, x, mode="greedy"):
+        return (
+            pred_seq
+            if tgt_tensor is None and not store_attn
+            else (pred_seq, loss)
+            if not store_attn
+            else (pred_seq, attn_array)
+        )
+
+    def forward(self, x, *, mode="greedy", return_attn=False):
         """
         endcode, decode (greedy)
         """
         enc_out, enc_hidden = self.encoder(x)
-        input_seq_mask = torch.ones_like(x).masked_fill(x == data.vocabulary[data.__PAD__], 0)
+        input_seq_mask = torch.ones_like(x).masked_fill(
+            x == data.vocabulary[data.__PAD__], 0
+        )
 
         if mode == "greedy":
-            return self._greedy_decode(enc_out, enc_hidden, input_seq_mask)
+            return self._greedy_decode(enc_out, enc_hidden, input_seq_mask, store_attn=return_attn)
         else:
             raise NotImplementedError
 
@@ -136,15 +163,21 @@ class EncoderDecoderModel(nn.Module):
         self.dec_optim.zero_grad()
 
         enc_output, enc_hidden = self.encoder(x)
-        input_seq_mask = torch.ones_like(x).masked_fill(x == data.vocabulary[data.__PAD__], 0)
+        input_seq_mask = torch.ones_like(x).masked_fill(
+            x == data.vocabulary[data.__PAD__], 0
+        )
 
         use_teacher_forcing = random.random() < teacher_forcing_ratio
 
         if use_teacher_forcing:
-            loss = self._teacher_forcing(enc_output, enc_hidden, input_seq_mask, tgt_tensor=y)
+            loss = self._teacher_forcing(
+                enc_output, enc_hidden, input_seq_mask, tgt_tensor=y
+            )
 
         else:
-            _, loss = self._greedy_decode(enc_output, enc_hidden, input_seq_mask, tgt_tensor=y)
+            _, loss = self._greedy_decode(
+                enc_output, enc_hidden, input_seq_mask, tgt_tensor=y
+            )
 
         if l2_penalty is not None:
             loss += self._l2_regularize(l2_penalty)
@@ -213,7 +246,9 @@ class EncoderDecoderModel(nn.Module):
             for x, y in dataset:
                 batch_size = x.size(1)
                 encoder_output, encoder_hidden = self.encoder(x)
-                input_mask = torch.ones_like(x).masked_fill(x == data.vocabulary[data.__PAD__], 0)
+                input_mask = torch.ones_like(x).masked_fill(
+                    x == data.vocabulary[data.__PAD__], 0
+                )
                 pred_seq, decode_loss = self._greedy_decode(
                     encoder_output, encoder_hidden, input_mask=input_mask, tgt_tensor=y
                 )
@@ -237,8 +272,8 @@ class EncoderDecoderModel(nn.Module):
                     else:
                         tp_count += 1
 
-            accuracy = tp_count / (len(dataset._dataset))
-            loss = loss.item() / len(dataset._dataset)
+            accuracy = tp_count / dataset.n_elements
+            loss = loss.item() / dataset.n_elements
             if verbose:
                 print(
                     *(
