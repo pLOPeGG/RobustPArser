@@ -1,8 +1,13 @@
-import torch
+import math
 
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 
 from torch import nn
 from torch.nn import functional as F
+
+from robust_parser import data
 
 
 class BahdanauAttention(nn.Module):
@@ -18,6 +23,8 @@ class BahdanauAttention(nn.Module):
         self.key_layer = nn.Linear(key_size, hidden_size, bias=False)
         self.query_layer = nn.Linear(query_size, hidden_size, bias=False)
         self.energy_layer = nn.Linear(hidden_size, 1, bias=False)
+
+        self.alphas = None
 
     def forward(self, decoder_hidden, encoder_hidden, mask=None):
         assert mask is not None, "mask is required"
@@ -87,3 +94,39 @@ class AttnDecoderRNN(nn.Module):
 
         output = self.log_softmax(self.out(output))
         return output.refine_names(..., "V"), hidden
+
+
+def visualize_attn(x, y, attn):
+    batch_size = x.size(1)
+
+    nrows, ncols = int(math.ceil(batch_size**.5)), int(math.ceil(batch_size**.5))
+    fig, ax = plt.subplots(nrows, ncols)
+
+    for batch_idx in range(batch_size):
+        batch_tuple = divmod(batch_idx, ncols)
+        src = [data.rev_vocabulary[i.item()] for i in x[:, batch_idx]]
+        trg = [data.rev_vocabulary[i.item()] for i in y[:, batch_idx]]
+        trg = trg[
+            : next(
+                i for i, v in enumerate(y[:, batch_idx]) if v.item() == data.vocabulary[data.__END__]
+            )
+        ]
+
+        scores = np.transpose(attn[: len(trg), :, batch_idx], (1, 0))
+
+        heatmap = ax[batch_tuple].pcolor(scores, cmap="viridis")
+
+        ax[batch_tuple].set_xticklabels(trg, minor=False, rotation="vertical")
+        ax[batch_tuple].set_yticklabels(src, minor=False)
+
+        # put the major ticks at the middle of each cell
+        # and the x-ticks on top
+        ax[batch_tuple].xaxis.tick_top()
+        ax[batch_tuple].set_xticks(np.arange(scores.shape[1]) + 0.5, minor=False)
+        ax[batch_tuple].set_yticks(np.arange(scores.shape[0]) + 0.5, minor=False)
+        ax[batch_tuple].invert_yaxis()
+
+    for i in range(batch_size, nrows * ncols):
+        fig.delaxes(ax.flatten()[i])
+    # plt.colorbar(heatmap)
+    plt.show()
