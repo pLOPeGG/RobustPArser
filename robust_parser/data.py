@@ -109,6 +109,13 @@ class DateLoader(torch.utils.data.DataLoader):
 
             yield (next_input.to(self.device), next_output.to(self.device))
 
+    @property
+    def n_elements(self):
+        if self.drop_last:
+            return len(self) * self.batch_size
+        else:
+            return len(self._dataset)
+
     def __len__(self):
         return len(self._sampler)
 
@@ -121,8 +128,8 @@ def get_date_dataloader(
 
 def generate_date() -> datetime.date:
     # up to 20 years
-    days_diff = datetime.timedelta(days=random.randint(0, 365 * 20 + 5))
-    beg_date = datetime.date(2000, 1, 1)
+    days_diff = datetime.timedelta(days=random.randint(0, 365 * 25 + 5))
+    beg_date = datetime.date(1995, 1, 1)
 
     return beg_date + days_diff
 
